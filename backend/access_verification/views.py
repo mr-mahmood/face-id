@@ -22,18 +22,18 @@ class ImageAccessCheckAPIView(APIView):
 
     def post(self, request):
         start = time.time()
-        
-        # Validate request data
-        serializer = self.serializer_class(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        validated_data = cast(ImageAccessCheckSerializer,  serializer.validated_data)
 
         # Load required resources
         get_faiss_index()
         face_pipeline = load_pipeline()
+        
+        # Validate request data
+        serializer = self.serializer_class(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
 
-        images = validated_data.images
-        gate_id = validated_data.gate
+        images = validated_data.get('images')  # type: ignore
+        gate_id = validated_data.get('gate')  # type: ignore
 
         # Get gate instance
         gate: Gate | None = util.get_gate(gate_id)

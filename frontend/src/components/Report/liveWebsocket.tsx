@@ -1,15 +1,22 @@
 "use client";
 
+import { API_BASE_URL } from "@/config/index";
 import { Gate } from "@/src/types/gate";
+import { useRouter } from 'next/navigation';
 import { useActiveUser } from "@/src/contexts/active_user_context";
 import { Area } from "@/src/types/area";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { AccessHistory } from "@/src/types/accessHistory";
 
 export default function GateReport() {
+    const router = useRouter();
+    const [hasError, setHasError] = useState(false);
+    const [errorMessage, setErrorMessage] = useState('');
     const { activeUser } = useActiveUser();
+    
     // Store active image index for each event separately
     const [activeImageIndices, setActiveImageIndices] = useState<Map<number, number>>(new Map());
+    
     // Flatten all gates from all areas with area context
     const gatesWithArea: { gate: Gate; area: Area }[] = activeUser?.areas?.flatMap(area =>
         area.gates.map(gate => ({ gate, area }))
@@ -25,16 +32,41 @@ export default function GateReport() {
     // WebSocket connections ref
     const webSocketsRef = useRef<Map<number, WebSocket>>(new Map());
 
+    // Track gates that are currently connecting to prevent duplicate connections
+    const connectingGatesRef = useRef<Set<number>>(new Set());
+
     // Store carousel instances
     const carouselInstancesRef = useRef<Map<number, any>>(new Map());
 
-    const handleGateClick = (gateId: number) => {
+    // Maximum number of events to keep per gate
+    const MAX_EVENTS_PER_GATE = 50;
+
+    const handleGateClick = useCallback((gateId: number) => {
         console.log(`Gate ID: ${gateId}`);
         const gate = gatesWithArea.find(item => item.gate.id === gateId);
         if (gate) {
             setSelectedGate(gate);
         }
-    };
+    }, [gatesWithArea]);
+
+    // Function to safely close a WebSocket connection
+    const closeWebSocket = useCallback((gateId: number) => {
+        const socket = webSocketsRef.current.get(gateId);
+        if (socket) {
+            socket.onopen = null;
+            socket.onclose = null;
+            socket.onerror = null;
+            socket.onmessage = null;
+
+            if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+                socket.close(1000, "Normal closure");
+            }
+
+            webSocketsRef.current.delete(gateId);
+            connectingGatesRef.current.delete(gateId);
+            console.log(`WebSocket cleaned up for gate ${gateId}`);
+        }
+    }, []);
 
     // Connect to WebSocket for selected gate
     useEffect(() => {
@@ -42,66 +74,118 @@ export default function GateReport() {
 
         const gateId = selectedGate.gate.id;
 
-        // Check if already connected
-        if (webSocketsRef.current.has(gateId)) {
-            return;
+        if (webSocketsRef.current.has(gateId) || connectingGatesRef.current.has(gateId)) {
+            const existingSocket = webSocketsRef.current.get(gateId);
+            if (existingSocket?.readyState === WebSocket.OPEN) {
+                console.log(`WebSocket already connected for gate ${gateId}`);
+                return;
+            }
         }
 
-        // Create WebSocket connection
+        connectingGatesRef.current.add(gateId);
+        console.log(`Creating WebSocket connection for gate ${gateId}`);
+        
         const socket = new WebSocket(`ws://localhost:8000/ws/access-events/${gateId}/`);
 
         socket.onopen = () => {
-            console.log(`WebSocket connected for gate ${gateId}`);
+            console.log(`✅ WebSocket connected for gate ${gateId}`);
+            setHasError(false);
+            connectingGatesRef.current.delete(gateId);
+            webSocketsRef.current.set(gateId, socket);
         };
 
-        socket.onclose = () => {
-            console.log(`WebSocket disconnected for gate ${gateId}`);
+        socket.onclose = (event) => {
+            console.log(`🔴 WebSocket disconnected for gate ${gateId}`, {
+                code: event.code,
+                reason: event.reason,
+                wasClean: event.wasClean
+            });
             webSocketsRef.current.delete(gateId);
+            connectingGatesRef.current.delete(gateId);
+
+            switch(event.code) {
+                case 4000:
+                    setHasError(true);
+                    setErrorMessage('نیاز به احراز هویت مجدد');
+                    router.prefetch('/login');
+                    fetch(`${API_BASE_URL}/api/auth/logout/`, {
+                        method: 'POST',
+                        headers: { "Content-Type": "application/json" },
+                        credentials: 'include',
+                    }).catch(error => {
+                        console.error("Error during logout fetch:", error instanceof Error ? error.message : String(error));
+                    }).finally(() => {
+                        setTimeout(() => {
+                            router.push('/login');
+                        }, 3000);
+                    });
+                    break;
+                case 4001:
+                    setHasError(true);
+                    setErrorMessage('در ارتباط با گیت مدنظر شما مشکلی وجود دارد');
+                    break;
+                case 4002:
+                    setHasError(true);
+                    setErrorMessage('گیت مدنظر یافت نشد یا غیرفعال است');
+                    break;
+                case 4003:
+                    setHasError(true);
+                    setErrorMessage('شما اجازه این کار را ندارید');
+                    break;
+                default:
+                    break;
+            }
         };
 
         socket.onerror = (err) => {
-            console.error(`WebSocket error for gate ${gateId}:`, err);
+            console.error(`❌ WebSocket error for gate ${gateId}:`, err);
+            connectingGatesRef.current.delete(gateId);
         };
 
         socket.onmessage = (event) => {
-            const data: AccessHistory = JSON.parse(event.data);
-            console.log(`Event received for gate ${gateId}:`, data);
+            try {
+                const data: AccessHistory = JSON.parse(event.data);
+                console.log(data);
 
-            // Update events for this gate
-            setGateEvents(prev => {
-                const newMap = new Map(prev);
-                const currentEvents = newMap.get(gateId) || [];
-                // Add new event to the beginning of the array
-                newMap.set(gateId, [data, ...currentEvents]);
-                return newMap;
-            });
-        };
+                setGateEvents(prev => {
+                    const newMap = new Map(prev);
+                    const currentEvents = newMap.get(gateId) || [];
 
-        // Store the socket
-        webSocketsRef.current.set(gateId, socket);
+                    const eventExists = currentEvents.some(
+                        existingEvent => existingEvent.id === data.id
+                    );
 
-        // Cleanup on unmount or gate change
-        return () => {
-            if (socket.readyState === WebSocket.OPEN) {
-                socket.close();
+                    if (!eventExists) {
+                        const updatedEvents = [data, ...currentEvents].slice(0, MAX_EVENTS_PER_GATE);
+                        newMap.set(gateId, updatedEvents);
+                        console.log(`📨 New event for gate ${gateId}:`, data.id);
+                    } else {
+                        console.log(`🔄 Duplicate event ignored for gate ${gateId}:`, data.id);
+                    }
+
+                    return newMap;
+                });
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
             }
-            webSocketsRef.current.delete(gateId);
         };
-    }, [selectedGate]);
 
-    // Get events for current gate - MOVED THIS UP before the carousel useEffect
+        return () => {
+            closeWebSocket(gateId);
+        };
+    }, [selectedGate?.gate.id, closeWebSocket, router]);
+
+    // Get events for current gate
     const currentGateEvents = selectedGate ? gateEvents.get(selectedGate.gate.id) || [] : [];
 
-    // Initialize Bootstrap carousels without auto-slide - MOVED THIS AFTER currentGateEvents declaration
+    // Initialize Bootstrap carousels without auto-slide
     useEffect(() => {
         if (!currentGateEvents.length) return;
 
-        // Initialize each carousel
         currentGateEvents.forEach((event) => {
             if (event.images && event.images.length > 1) {
                 const carouselElement = document.querySelector(`#carousel-${event.id}`);
                 if (carouselElement && !carouselInstancesRef.current.has(event.id)) {
-                    // Initialize carousel with interval: false to prevent auto-slide
                     const bsCarousel = new (window as any).bootstrap.Carousel(carouselElement, {
                         interval: false,
                         ride: false,
@@ -109,7 +193,6 @@ export default function GateReport() {
                     });
                     carouselInstancesRef.current.set(event.id, bsCarousel);
 
-                    // Listen to slide events to update state
                     carouselElement.addEventListener('slid.bs.carousel', (e: any) => {
                         setActiveImageIndices(prev => {
                             const newMap = new Map(prev);
@@ -121,7 +204,6 @@ export default function GateReport() {
             }
         });
 
-        // Cleanup
         return () => {
             carouselInstancesRef.current.forEach((instance, id) => {
                 instance.dispose();
@@ -133,25 +215,31 @@ export default function GateReport() {
     // Cleanup all WebSockets on component unmount
     useEffect(() => {
         return () => {
-            webSocketsRef.current.forEach((socket) => {
-                if (socket.readyState === WebSocket.OPEN) {
-                    socket.close();
-                }
+            console.log('Cleaning up all WebSocket connections');
+            const gateIds = Array.from(webSocketsRef.current.keys());
+            gateIds.forEach(gateId => {
+                closeWebSocket(gateId);
             });
             webSocketsRef.current.clear();
+            connectingGatesRef.current.clear();
 
-            // Cleanup carousels
             carouselInstancesRef.current.forEach((instance) => {
-                instance.dispose();
+                if (instance && typeof instance.dispose === 'function') {
+                    instance.dispose();
+                }
             });
             carouselInstancesRef.current.clear();
         };
-    }, []);
+    }, [closeWebSocket]);
 
     // Helper function to format Persian date
     const formatPersianDate = (timestamp: string) => {
-        const date = new Date(timestamp);
-        return date.toLocaleTimeString('fa-IR') + ' ' + date.toLocaleDateString('fa-IR');
+        try {
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString('fa-IR') + ' ' + date.toLocaleDateString('fa-IR');
+        } catch {
+            return 'تاریخ نامعتبر';
+        }
     };
 
     const { getRoleInFarsi } = useActiveUser();
@@ -173,7 +261,6 @@ export default function GateReport() {
 
     return (
         <div className="row">
-
             <div className="col-md-3">
                 <div className="card hover-effect b-r-25 cards-scrollable" style={{ height: '41vh' }}>
                     <div className="card-header">
@@ -182,25 +269,30 @@ export default function GateReport() {
                     <div className="card-body">
                         <div className="vertical-tab setting-tab">
                             <ul className="nav nav-tabs tab-light-info m-0 flex-column" id="v-bg" role="tablist">
-                                {gatesWithArea.map(({ gate, area }, index) => (
-                                    <li className="nav-item w-100 mb-2" key={gate.id} role="presentation">
-                                        <button
-                                            aria-controls={`tab-${gate.id}`}
-                                            aria-selected={selectedGate?.gate.id === gate.id}
-                                            className={`nav-link b-r-25 w-100 text-start ${selectedGate?.gate.id === gate.id ? 'active' : ''}`}
-                                            data-bs-target={`#tab-${gate.id}-pane`}
-                                            data-bs-toggle="tab"
-                                            id={`tab-${gate.id}`}
-                                            role="tab"
-                                            type="button"
-                                            onClick={() => handleGateClick(gate.id)}
-                                        >
-                                            <i className="ph-bold ph-door pe-2"></i>
-                                            {gate.name} ({area.name})
-                                        </button>
-                                    </li>
-                                ))}
-
+                                {gatesWithArea.map(({ gate, area }) => {
+                                    if (gate.is_active && area.is_active) {
+                                        return (
+                                            <li className="nav-item w-100 mb-2" key={gate.id} role="presentation">
+                                                <button
+                                                    aria-controls={`tab-${gate.id}`}
+                                                    aria-selected={selectedGate?.gate.id === gate.id}
+                                                    className={`nav-link b-r-25 w-100 text-start ${selectedGate?.gate.id === gate.id ? 'active' : ''}`}
+                                                    data-bs-target={`#tab-${gate.id}-pane`}
+                                                    data-bs-toggle="tab"
+                                                    id={`tab-${gate.id}`}
+                                                    role="tab"
+                                                    type="button"
+                                                    onClick={() => handleGateClick(gate.id)}
+                                                >
+                                                    <i className="ph-bold ph-door pe-2"></i>
+                                                    {gate.name} ({area.name})
+                                                </button>
+                                            </li>
+                                        );
+                                    }
+                                    return null;
+                                })}
+                                
                                 {gatesWithArea.length === 0 && (
                                     <li className="nav-item">
                                         <div className="alert alert-info m-3">
@@ -245,42 +337,6 @@ export default function GateReport() {
                                         {selectedGate.gate.name}
                                     </span>
                                 </div>
-                                <div className="about-list-item">
-                                    <span className="about-list-label">
-                                        <i className="ti ti-camera"></i> دوربین:
-                                    </span>
-                                    <span className="about-list-value">
-                                        {selectedGate.gate.camera || 'ندارد'}
-                                    </span>
-                                </div>
-                                <div className="about-list-item">
-                                    <span className="about-list-label">
-                                        <i className="ti ti-circle-check"></i> نقش:
-                                    </span>
-                                    <div style={{ justifySelf: "end" }}>
-                                        {(() => {
-                                            if (selectedGate.gate.role === "ENTERY") {
-                                                return (
-                                                    <span className="badge text-light-cyan b-r-25 f-s-17">
-                                                        <i className="ti ti-door-enter"></i> ورودی
-                                                    </span>
-                                                );
-                                            } else if (selectedGate.gate.role === "EXIT") {
-                                                return (
-                                                    <span className="badge text-light-dark-orange b-r-25 f-s-17">
-                                                        <i className="ti ti-door-exit"></i> خروجی
-                                                    </span>
-                                                );
-                                            } else if (selectedGate.gate.role === "SURVEILLANCE") {
-                                                return (
-                                                    <span className="badge text-light-see-blue b-r-25 f-s-17">
-                                                        <i className="ti ti-device-computer-camera"></i> نظارت
-                                                    </span>
-                                                );
-                                            }
-                                        })()}
-                                    </div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -289,134 +345,141 @@ export default function GateReport() {
 
             {/* Right Content Area - Scrollable Events */}
             <div className="col-md-9 cards-scrollable" style={{ height: '86vh' }}>
+                {currentGateEvents.length === 0 ? (
+                    <>
+                        {hasError && (
+                            <div className="row">
+                                <div className="col-md-6 col-xxl-4"></div>
+                                <div className="col-md-6 col-xxl-4">
+                                    <div className="card overflow-hidden b-s-6-danger">
+                                        <div className="card-body">
+                                            <i className="ti ti-alert-circle f-s-60 text-danger" style={{display: 'block', textAlign: 'center'}}></i>
+                                            <h4 className="text-danger text-center">مشکلی به وجود آمد</h4>
+                                            <p className="text-muted mb-0 text-center">{errorMessage}</p>
+                                            {errorMessage.includes('احراز هویت') && (
+                                                <div className="mt-1 text-center">
+                                                    <span className="text-muted small">در حال انتقال به صفحه ورود</span>
+                                                    <div className="spinner-border spinner-border-sm text-muted me-2" role="status">
+                                                        <span className="visually-hidden">در حال انتقال</span>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <img alt="توضیحات تصویر" className="card-img-bottom mt-0" src="/images/background/error.jpg" />
+                                    </div>
+                                </div>
+                                <div className="col-md-6 col-xxl-4"></div>
+                            </div>
+                        )}
+                    </>
+                ) : (
+                    <div className="row">
+                        {currentGateEvents.map((event) => {
+                            const currentImageIndex = activeImageIndices.get(event.id) || 0;
 
-                <div className="row">
-                    {currentGateEvents.map((event) => {
-                        const currentImageIndex = activeImageIndices.get(event.id) || 0;
-
-                        return (
-                            <div className="col-md-4 mb-0" key={event.id}>
-                                <div className={`card book-mark-card hover-effect b-r-25 ${event.status === 'ALLOWED' ? 'b-s-4-success' : 'b-s-4-danger'}`}>
-                                    <div className="card-body">
-                                        {event.images && event.images.length > 0 && (
-                                            <>
-                                                <div
-                                                    id={`carousel-${event.id}`}
-                                                    className="carousel slide"
-                                                >
-                                                    <div className="carousel-inner">
-                                                        {event.images.map((image, idx) => (
-                                                            <div
-                                                                key={image.id}
-                                                                className={`carousel-item ${idx === currentImageIndex ? 'active' : ''}`}
-                                                            >
-                                                                <img
-                                                                    alt={`تصویر ${idx + 1} از گزارش دسترسی`}
-                                                                    className="w-100 d-block b-r-25"
-                                                                    src={image.image}
-                                                                />
-                                                            </div>
-                                                        ))}
+                            return (
+                                <div className="col-md-4 mb-0" key={event.id}>
+                                    <div className={`card book-mark-card hover-effect b-r-25 ${event.status === 'ALLOWED' ? 'b-s-6-success' : 'b-s-6-danger'}`}>
+                                        <div className="card-body">
+                                            {event.images && event.images.length > 0 && (
+                                                <>
+                                                    <div
+                                                        id={`carousel-${event.id}`}
+                                                        className="carousel slide"
+                                                    >
+                                                        <div className="carousel-inner">
+                                                            {event.images.map((image, idx) => (
+                                                                <div
+                                                                    key={image.id}
+                                                                    className={`carousel-item ${idx === currentImageIndex ? 'active' : ''}`}
+                                                                >
+                                                                    <img
+                                                                        alt={`تصویر ${idx + 1} از گزارش دسترسی`}
+                                                                        className="w-100 d-block b-r-25"
+                                                                        src={image.image}
+                                                                    />
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        {event.images.length > 1 && (
+                                                            <>
+                                                                <button
+                                                                    className="carousel-control-prev"
+                                                                    data-bs-slide="prev"
+                                                                    data-bs-target={`#carousel-${event.id}`}
+                                                                    type="button"
+                                                                >
+                                                                    <span aria-hidden="true" className="carousel-control-prev-icon"></span>
+                                                                    <span className="visually-hidden">قبل</span>
+                                                                </button>
+                                                                <button
+                                                                    className="carousel-control-next"
+                                                                    data-bs-slide="next"
+                                                                    data-bs-target={`#carousel-${event.id}`}
+                                                                    type="button"
+                                                                >
+                                                                    <span aria-hidden="true" className="carousel-control-next-icon"></span>
+                                                                    <span className="visually-hidden">بعد</span>
+                                                                </button>
+                                                            </>
+                                                        )}
                                                     </div>
                                                     {event.images.length > 1 && (
-                                                        <>
-                                                            <button
-                                                                className="carousel-control-prev"
-                                                                data-bs-slide="prev"
-                                                                data-bs-target={`#carousel-${event.id}`}
-                                                                type="button"
-                                                            >
-                                                                <span aria-hidden="true" className="carousel-control-prev-icon"></span>
-                                                                <span className="visually-hidden">قبل</span>
-                                                            </button>
-                                                            <button
-                                                                className="carousel-control-next"
-                                                                data-bs-slide="next"
-                                                                data-bs-target={`#carousel-${event.id}`}
-                                                                type="button"
-                                                            >
-                                                                <span aria-hidden="true" className="carousel-control-next-icon"></span>
-                                                                <span className="visually-hidden">بعد</span>
-                                                            </button>
-                                                        </>
+                                                        <div className="text-center mt-2">
+                                                            <small className="text-muted">
+                                                                {currentImageIndex + 1} از {event.images.length}
+                                                            </small>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                            <div className="about-list">
+                                                {/* Single row item */}
+                                                <div className="row" style={{ width: '100% ' }}>
+                                                    {event.status === 'ALLOWED' ? (
+                                                        <span className="badge float-end text-light-success b-r-25 f-w-500 f-s-16 mt-0 mb-1">دسترسی مجاز</span>
+                                                    ) : (
+                                                        <span className="badge float-end text-light-danger b-r-25 f-w-500 f-s-16 mt-0 mb-1">دسترسی غیر مجاز</span>
                                                     )}
                                                 </div>
-                                                {/* Image counter */}
-                                                {event.images.length > 1 && (
-                                                    <div className="text-center mt-2">
-                                                        <small className="text-muted">
-                                                            {currentImageIndex + 1} از {event.images.length}
-                                                        </small>
-                                                    </div>
-                                                )}
-                                            </>
-                                        )}
-                                        <div className="about-list">
-                                            <div className="about-list-item">
-                                                <span className="about-list-label">
-                                                    دسترسی:
-                                                </span>
-                                                <span className="about-list-value">
-                                                    {event.status === 'ALLOWED' ? (
-                                                        <span className="badge float-end text-light-success b-r-25 f-w-500 f-s-16 mt-0 mb-1">مجاز</span>
-                                                    ) : (
-                                                        <span className="badge float-end text-light-danger b-r-25 f-w-500 f-s-16 mt-0 mb-1">غیر مجاز</span>
-                                                    )}
-                                                </span>
-                                            </div>
-                                            <div className="about-list-item">
-                                                <span className="about-list-label">
-                                                    نام:
-                                                </span>
-                                                <span className="about-list-value">
-                                                    {event.user && event.user.first_name ? (
-                                                        <>
-                                                            {`${event.user.first_name} ${event.user.last_name}`}
-                                                        </>
-                                                    ) : (
-                                                        `---`
-                                                    )}
-                                                </span>
-                                            </div>
-                                            <div className="about-list-item">
-                                                <span className="about-list-label">
-                                                    کد پرسنلی:
-                                                </span>
-                                                <span className="about-list-value">
-                                                    {event.user && event.user.employe_number ? (
-                                                        `${event.user.employe_number}`
-                                                    ) : (
-                                                        `---`
-                                                    )}
-                                                </span>
-                                            </div>
-                                            <div className="about-list-item">
-                                                <span className="about-list-label">
-                                                    تاریخ:
-                                                </span>
-                                                <span className="about-list-value">
-                                                    {formatPersianDate(event.timestamp)}
-                                                </span>
-                                            </div>
-                                            <div className="about-list-item">
-                                                <span className="about-list-label">
-                                                    اطمینان:
-                                                </span>
-                                                <span className="about-list-value">
-                                                    {event.confidence ? (
-                                                        `% ${Math.round(event.confidence * 100)}`
-                                                    ) : (
-                                                        `---`
-                                                    )}
-                                                </span>
+
+                                                {/* Row 1: Name */}
+                                                <div className="about-list-item" style={{ borderTop: '1px solid #dee2e6', paddingTop: '0.5rem' }}>
+                                                    <span className="about-list-label f-s-15">مالک:</span>
+                                                    <span className="about-list-value">
+                                                        {event.user?.first_name || event.user?.last_name 
+                                                            ? `${event.user?.first_name || ''} ${event.user?.last_name || ''}`.trim()
+                                                            : '---'
+                                                        }
+                                                    </span>
+                                                </div>
+
+                                                {/* Row 2: Area and Gate*/}
+                                                <div className="about-list-item">
+                                                    <span className="about-list-label">محوطه:</span>
+                                                    <span className="about-list-value">
+                                                        {event.area?.name || event.gate?.name 
+                                                            ? `${event.area?.name  || ''} ( ${event.gate?.name} )`.trim()
+                                                            : '---'
+                                                        }
+                                                    </span>
+                                                </div>
+
+                                                {/* Row 3: Date and Confidence */}
+                                                <div className="about-list-item">
+                                                    <span className="about-list-label">تاریخ:</span>
+                                                    <span className="about-list-value">
+                                                        {formatPersianDate(event.timestamp)}
+                                                    </span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
-                            </div>
-                        );
-                    })}
-                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
         </div>
     );

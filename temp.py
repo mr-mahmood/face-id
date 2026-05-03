@@ -26,8 +26,8 @@ class WebcamAccessCheck:
             return False
         
         # Set resolution (optional)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         
         print("Webcam started successfully!")
         print("\nControls:")
@@ -258,7 +258,7 @@ class WebcamAccessCheck:
 def main():
     # Configuration
     API_URL = 'http://localhost:8000/api/access/check/image/'
-    GATE_ID = 2
+    GATE_ID = 1
     
     # Create and run the webcam access check
     webcam_check = WebcamAccessCheck(API_URL, GATE_ID)

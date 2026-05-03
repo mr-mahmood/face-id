@@ -43,7 +43,6 @@ class GateAPIView(GenericAPIView):
             severity=SecurityEvent.Severity.INFO,
             ip_address=get_client_ip(request),
             user_agent=request.META.get("HTTP_USER_AGENT", ""),
-            
             message=f'{acting_user.role} {acting_user.employe_number} create ->  gate {gate.id}.{gate.name}'
         )
 
