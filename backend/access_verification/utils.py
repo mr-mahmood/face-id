@@ -21,7 +21,7 @@ def get_gate(gate_id):
         return None
 
 
-def process_images(images, target_size=(640, 480), quality=100):
+def process_images(images, target_size=(1920, 1080), quality=100):
     """Process uploaded images and prepare for face detection
     
     Args:

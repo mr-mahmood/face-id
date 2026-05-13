@@ -445,7 +445,7 @@ export default function GateReport() {
 
                                                 {/* Row 1: Name */}
                                                 <div className="about-list-item" style={{ borderTop: '1px solid #dee2e6', paddingTop: '0.5rem' }}>
-                                                    <span className="about-list-label f-s-15">مالک:</span>
+                                                    <span className="about-list-label f-s-15">نام:</span>
                                                     <span className="about-list-value">
                                                         {event.user?.first_name || event.user?.last_name 
                                                             ? `${event.user?.first_name || ''} ${event.user?.last_name || ''}`.trim()

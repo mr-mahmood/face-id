@@ -47,8 +47,8 @@ def main():
     # -----------------------------------------------
     # Configuration
     # -----------------------------------------------
-    WIDTH = int(os.getenv("WIDTH", 640))
-    HEIGHT = int(os.getenv("HEIGHT", 480))
+    WIDTH = int(os.getenv("WIDTH", 1920))
+    HEIGHT = int(os.getenv("HEIGHT", 1080))
     CHANNELS = int(os.getenv("CHANNELS", 3))
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 10))
     

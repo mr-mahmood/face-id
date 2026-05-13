@@ -41,7 +41,7 @@ def capture_frames():
             continue
 
         # Resize if needed
-        frame_resized = cv2.resize(frame, (640, 480))
+        frame_resized = cv2.resize(frame, (1920, 1080))
 
         # Encode to JPEG
         ret, buffer = cv2.imencode(".jpg", frame_resized)
@@ -83,7 +83,7 @@ def index():
     </head>
     <body>
         <h1>Live Webcam Stream</h1>
-        <img src="/video" crossorigin="anonymous" width="640" height="480">
+        <img src="/video" crossorigin="anonymous" width="1920" height="1080">
     </body>
     </html>
     """

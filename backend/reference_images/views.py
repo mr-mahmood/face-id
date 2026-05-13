@@ -24,8 +24,9 @@ class ReferenceImageEnrollAPIView(APIView):
         current_user: User = request.user
         serializer = self.serializer_class(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        validated_data = cast(ReferenceImages, serializer.validated_data)
-        image_file = validated_data.image
+        validated_data = serializer.validated_data
+
+        image_file = validated_data.get('image')  # type: ignore
         user = User.get_user(user_id=user_id, current_user=current_user)
         
         if not image_file:
